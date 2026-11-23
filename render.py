@@ -1,382 +1,448 @@
 #!/usr/bin/env python3
-"""Render one front page: Monday 23 November 2026 world news.
+"""Render the news-image-20261123 front page: one image, 38 stories, 9 regions.
 
-Own code, written in-session for this edition. Deterministic: no clock,
-no random, fixed font paths, sorted lookups only. Reads stories.json next
-to this file and writes the PNG to /output/entry.png (or $ENTRY_OUT).
-Coverage is as of 00:30 UTC on Monday 23 November 2026 - most stories
-are Sunday 22 November events reported overnight, labelled as such.
+Reads stories.json (verified stories for Monday 23 November 2026) and
+draws a 1024x1024 newspaper front page with PIL. Deterministic: same
+input gives byte-identical output (no timestamps, no randomness).
 """
+
 import json
 import os
-from pathlib import Path
-
 from PIL import Image, ImageDraw, ImageFont
 
-HERE = Path(__file__).resolve().parent
-DATA = json.loads((HERE / "stories.json").read_text(encoding="utf-8"))
-OUT = Path(os.environ.get("ENTRY_OUT", "/output/entry.png"))
+HERE = os.path.dirname(os.path.abspath(__file__))
+DATA = os.path.join(HERE, "stories.json")
+OUT = os.path.join(HERE, "entry.png")
 
-W = H = 1024
-M = 26                       # outer margin
-PAPER = (250, 246, 236)      # warm newsprint
-INK = (24, 24, 28)
-RED = (178, 34, 28)
-BLUE = (28, 58, 112)
-TEAL = (18, 96, 84)
-AMBER = (196, 120, 20)
-GREY = (96, 92, 86)
-LINE = (200, 192, 178)
+W, H = 1024, 1024
+PAPER = (246, 241, 229)
+INK = (17, 17, 17)
+RED = (179, 32, 44)
+GRAY = (85, 85, 85)
+RULE = (120, 115, 105)
+OCEAN = (201, 223, 232)
+LAND = (233, 220, 189)
+LAND_EDGE = (185, 168, 106)
+PIN = (192, 32, 44)
 
-FONT_DIR = Path("/usr/share/fonts/truetype/dejavu")
-SERIF = FONT_DIR / "DejaVuSerif-Bold.ttf"
-SERIF_R = FONT_DIR / "DejaVuSerif.ttf"
-SANS = FONT_DIR / "DejaVuSans-Bold.ttf"
-SANS_R = FONT_DIR / "DejaVuSans.ttf"
-
-
-def font(path, size):
-    return ImageFont.truetype(str(path), size)
-
-
-F = {
-    "brand": font(SANS, 11),
-    "date": font(SERIF, 44),
-    "counts": font(SANS, 12),
-    "strip": font(SANS, 13),
-    "kick": font(SANS, 10),
-    "head": font(SERIF, 17),
-    "mid_head": font(SERIF, 13),
-    "body": font(SERIF_R, 11),
-    "small": font(SANS_R, 10),
-    "tiny": font(SANS_R, 9),
-    "list_head": font(SERIF, 12),
-    "num": font(SANS, 12),
-    "chip": font(SANS, 9),
-    "pin": font(SANS, 8),
+BADGES = {
+    "CONFIRMED": (30, 122, 60),
+    "REPORTED": (51, 51, 51),
+    "CLAIMED": (179, 32, 44),
+    "OFFICIAL": (31, 78, 156),
 }
 
+FONT_DIR = "/usr/share/fonts/truetype/dejavu"
 
-def measure(draw, text, fnt):
-    b = draw.textbbox((0, 0), text, font=fnt)
-    return b[2] - b[0], b[3] - b[1]
+
+def font(name, size):
+    """Load a DejaVu font; fall back to PIL's default bitmap font."""
+    try:
+        return ImageFont.truetype(os.path.join(FONT_DIR, name), size)
+    except (OSError, IOError):
+        return ImageFont.load_default()
+
+
+def serif_b(size):
+    return font("DejaVuSerif-Bold.ttf", size)
+
+
+def serif(size):
+    return font("DejaVuSerif.ttf", size)
+
+
+def sans_b(size):
+    return font("DejaVuSans-Bold.ttf", size)
+
+
+def sans(size):
+    return font("DejaVuSans.ttf", size)
 
 
 def wrap(draw, text, fnt, max_w):
-    words, lines, cur = text.split(), [], ""
-    for w in words:
-        trial = (cur + " " + w).strip()
-        if measure(draw, trial, fnt)[0] <= max_w or not cur:
+    """Greedy word wrap of text to a pixel width; returns a list of lines."""
+    words = text.split()
+    lines, cur = [], ""
+    for word in words:
+        trial = word if not cur else cur + " " + word
+        if draw.textlength(trial, font=fnt) <= max_w:
             cur = trial
         else:
-            lines.append(cur)
-            cur = w
+            if cur:
+                lines.append(cur)
+            cur = word
     if cur:
         lines.append(cur)
-    return lines
+    return lines or [""]
 
 
-def draw_chip(draw, x, y, text, fg, bg):
-    tw, th = measure(draw, text, F["chip"])
-    pad_x, pad_y = 5, 1
-    draw.rounded_rectangle(
-        [x, y, x + tw + pad_x * 2, y + th + pad_y * 2 + 1],
-        radius=3, fill=bg)
-    draw.text((x + pad_x, y + pad_y), text, font=F["chip"], fill=fg)
-    return tw + pad_x * 2
+def text_w(draw, text, fnt):
+    return draw.textlength(text, font=fnt)
 
 
-def tag_chip(draw, x, y, label):
-    palette = {
-        "CONFIRMED": ((255, 255, 255), (18, 96, 84)),
-        "OFFICIAL": ((255, 255, 255), (28, 58, 112)),
-        "REPORTED": ((24, 24, 28), (232, 226, 212)),
-        "CLAIMED": ((255, 255, 255), (178, 34, 28)),
-    }
-    fg, bg = palette.get(label, ((255, 255, 255), GREY))
-    return draw_chip(draw, x, y, label, fg, bg)
+def fit_lines(draw, text, sizes, max_w, max_lines):
+    """Pick the largest serif-bold size (from sizes, biggest first) whose
+    wrap fits in max_lines; returns (font, lines)."""
+    for size in sizes:
+        fnt = serif_b(size)
+        lines = wrap(draw, text, fnt, max_w)
+        if len(lines) <= max_lines:
+            return fnt, lines
+    fnt = serif_b(sizes[-1])
+    return fnt, wrap(draw, text, fnt, max_w)[:max_lines]
 
 
-# ---- flat illustrations (own drawings, new for this edition) -------------
+def badge(draw, x, y, label):
+    """Draw a small coloured label pill; returns its width."""
+    fnt = sans_b(9)
+    tw = draw.textlength(label, font=fnt)
+    w, h = int(tw) + 10, 13
+    draw.rounded_rectangle([x, y, x + w, y + h], radius=3,
+                           fill=BADGES.get(label, (51, 51, 51)))
+    draw.text((x + 5, y + 2), label, font=fnt, fill=(255, 255, 255))
+    return w
+
+
+# ---------------------------------------------------------------- art panels
 
 def art_cop31(draw, x, y, w, h):
-    # Empty chairs around a broken table: the talks collapse.
-    draw.rectangle([x, y, x + w, y + h], fill=(58, 96, 138))
-    draw.ellipse([x + w - 52, y + 8, x + w - 8, y + 52], fill=(250, 214, 90))
-    draw.rectangle([x, y + h - 26, x + w, y + h], fill=(30, 46, 74))
-    # long table, cracked in the middle
-    draw.rectangle([x + 20, y + h - 58, x + w - 20, y + h - 46],
-                   fill=(196, 120, 20))
-    draw.line([x + w // 2, y + h - 58, x + w // 2 + 8, y + h - 46],
-              fill=(178, 34, 28), width=3)
-    # empty chairs, tipped
-    for cx in (36, 96, 156, 216):
-        draw.rectangle([x + cx, y + h - 44, x + cx + 22, y + h - 26],
-                       fill=(240, 236, 224))
-        draw.rectangle([x + cx + 4, y + h - 62, x + cx + 8, y + h - 44],
-                       fill=(240, 236, 224))
-    # two flags drooping
-    for fx, col in [(60, (178, 34, 28)), (180, (18, 96, 84))]:
-        draw.line([x + fx, y + 12, x + fx, y + 38], fill=(240, 236, 224),
-                  width=2)
-        draw.polygon([(x + fx, y + 12), (x + fx + 16, y + 16),
-                      (x + fx, y + 20)], fill=col)
+    """Flat illustration: climate summit skyline at dusk, sun, flags."""
+    draw.rectangle([x, y, x + w, y + h], fill=(38, 68, 104))
+    # sun
+    draw.ellipse([x + w - 62, y + 14, x + w - 18, y + 58], fill=(232, 196, 90))
+    # skyline blocks
+    base = y + h
+    blocks = [(0, 52, 46), (48, 74, 30), (80, 44, 52), (134, 84, 34),
+              (170, 60, 46), (218, 78, 30), (250, 50, 44), (296, 66, 26)]
+    for bx, bh, bw in blocks:
+        draw.rectangle([x + bx, base - bh, x + bx + bw, base],
+                       fill=(22, 38, 64))
+    # lit windows
+    for wx in range(x + 8, x + w - 8, 16):
+        for wy in range(y + h - 78, y + h - 8, 14):
+            if (wx * 7 + wy * 13) % 5 == 0:
+                draw.rectangle([wx, wy, wx + 5, wy + 7], fill=(232, 196, 90))
+    # ground strip
+    draw.rectangle([x, base - 10, x + w, base], fill=(196, 138, 52))
+    # flag poles with small pennants
+    for fx, col in [(x + 30, RED), (x + 110, (30, 122, 60)),
+                    (x + 200, (232, 196, 90)), (x + 280, (31, 78, 156))]:
+        draw.line([fx, base - 44, fx, base - 10], fill=(246, 241, 229), width=2)
+        draw.polygon([(fx, base - 44), (fx + 16, base - 39), (fx, base - 34)],
+                     fill=col)
 
 
 def art_gulf(draw, x, y, w, h):
-    # Tanker in the strait, smoke columns and a missile arc.
-    draw.rectangle([x, y, x + w, y + h], fill=(24, 52, 96))
-    draw.rectangle([x, y + h - 30, x + w, y + h], fill=(16, 34, 66))
-    # tanker hull
-    draw.rectangle([x + 30, y + h - 52, x + w - 30, y + h - 34],
-                   fill=(178, 34, 28))
-    draw.rectangle([x + w - 78, y + h - 70, x + w - 52, y + h - 52],
-                   fill=(240, 236, 224))
-    # smoke columns
-    for sx in (70, 130, 190):
-        draw.ellipse([x + sx - 8, y + 14, x + sx + 8, y + 34],
-                     fill=(120, 120, 118))
-        draw.ellipse([x + sx - 5, y + 6, x + sx + 5, y + 20],
-                     fill=(160, 158, 152))
-    # missile arc with flame
-    draw.arc([x + 150, y + 4, x + 240, y + 44], start=200, end=340,
-             fill=(250, 180, 60), width=3)
-    draw.ellipse([x + 228, y + 30, x + 236, y + 38], fill=(250, 120, 40))
-    # sea lanes
-    for ly in (y + h - 22, y + h - 12):
-        draw.line([x + 8, ly, x + w - 8, ly], fill=(120, 160, 200), width=1)
+    """Flat illustration: night over the Gulf, radar arcs, city blocks."""
+    draw.rectangle([x, y, x + w, y + h], fill=(16, 24, 46))
+    # stars
+    for sx, sy in [(20, 14), (70, 26), (130, 10), (190, 22), (250, 12),
+                   (300, 28), (45, 40), (160, 38), (230, 44), (285, 8)]:
+        draw.ellipse([x + sx, y + sy, x + sx + 3, y + sy + 3],
+                     fill=(255, 255, 255))
+    # moon
+    draw.ellipse([x + w - 52, y + 10, x + w - 26, y + 36], fill=(235, 230, 210))
+    # city blocks
+    base = y + h
+    for bx, bh, bw in [(0, 46, 58), (62, 62, 44), (110, 38, 66),
+                       (180, 56, 50), (234, 42, 54), (292, 60, 30)]:
+        draw.rectangle([x + bx, base - bh, x + bx + bw, base],
+                       fill=(52, 64, 92))
+        for wx in range(x + bx + 6, x + bx + bw - 6, 12):
+            for wy in range(base - bh + 8, base - 6, 12):
+                if (wx + wy) % 7 == 0:
+                    draw.rectangle([wx, wy, wx + 4, wy + 5],
+                                   fill=(232, 196, 90))
+    # orange radar arcs over the city
+    for cx, cy, r in [(x + 90, base - 30, 34), (x + 200, base - 26, 40),
+                      (x + 280, base - 34, 28)]:
+        draw.arc([cx - r, cy - r, cx + r, cy + r], start=180, end=360,
+                 fill=(232, 130, 40), width=3)
 
 
 def art_football(draw, x, y, w, h):
-    # Green pitch, goal, ball in the net: 4-0.
-    draw.rectangle([x, y, x + w, y + h], fill=(30, 110, 60))
+    """Flat illustration: floodlit pitch, centre circle, ball."""
+    draw.rectangle([x, y, x + w, y + h], fill=(30, 110, 58))
     # mowing stripes
-    for i in range(5):
+    for i in range(6):
         if i % 2 == 0:
-            draw.rectangle([x + i * (w // 5), y,
-                            x + (i + 1) * (w // 5), y + h],
-                           fill=(38, 126, 70))
-    # pitch lines
-    draw.line([x + w // 2, y, x + w // 2, y + h], fill=(240, 236, 224),
-              width=2)
-    draw.ellipse([x + w // 2 - 26, y + h // 2 - 26,
-                  x + w // 2 + 26, y + h // 2 + 26],
-                 outline=(240, 236, 224), width=2)
-    # goal frame top right
-    draw.rectangle([x + w - 66, y + 10, x + w - 10, y + 46],
-                   outline=(255, 255, 255), width=3)
-    draw.line([x + w - 66, y + 10, x + w - 10, y + 10],
-              fill=(255, 255, 255), width=3)
-    # ball in the net
-    draw.ellipse([x + w - 52, y + 22, x + w - 28, y + 46],
-                 fill=(255, 255, 255), outline=INK, width=1)
-    # scoreboard
-    draw.rectangle([x + 10, y + 8, x + 86, y + 30], fill=(24, 24, 28))
-    draw.text((x + 16, y + 11), "LIV 4-0 MUN", font=F["chip"],
-              fill=(250, 214, 90))
+            draw.rectangle([x, y + i * h // 6, x + w, y + (i + 1) * h // 6],
+                           fill=(36, 122, 64))
+    # halfway line and centre circle
+    draw.line([x + w // 2, y, x + w // 2, y + h], fill=(255, 255, 255), width=2)
+    draw.ellipse([x + w // 2 - 34, y + h // 2 - 34,
+                  x + w // 2 + 34, y + h // 2 + 34],
+                 outline=(255, 255, 255), width=2)
+    # floodlight masts
+    for mx in (x + 18, x + w - 18):
+        draw.line([mx, y + 8, mx, y + 34], fill=(220, 220, 220), width=3)
+        draw.ellipse([mx - 7, y + 2, mx + 7, y + 14], fill=(255, 244, 180))
+    # ball on the spot
+    bx, by = x + w // 2, y + h // 2
+    draw.ellipse([bx - 11, by - 11, bx + 11, by + 11], fill=(255, 255, 255))
+    draw.polygon([(bx, by - 6), (bx + 6, by - 2), (bx + 4, by + 6),
+                  (bx - 4, by + 6), (bx - 6, by - 2)], fill=(17, 17, 17))
 
 
-ARTS = {"cop31": art_cop31, "gulf": art_gulf, "football": art_football}
+ART = {"cop31": art_cop31, "gulf": art_gulf, "football": art_football}
 
+# ---------------------------------------------------------------- world map
 
-# ---- world map (equirectangular, own rough continent outlines) -----------
-
+# Rough continent outlines in (lon, lat); stylised, not survey-grade.
 CONTINENTS = [
     # North America
-    [(-168, 66), (-140, 70), (-120, 72), (-95, 80), (-80, 73), (-65, 60),
-     (-55, 47), (-70, 42), (-75, 35), (-81, 26), (-90, 21), (-97, 16),
-     (-105, 20), (-117, 33), (-125, 49), (-140, 60), (-168, 66)],
+    [(-168, 66), (-140, 70), (-120, 72), (-95, 80), (-80, 73), (-75, 62),
+     (-60, 55), (-55, 47), (-70, 42), (-75, 35), (-80, 32), (-85, 30),
+     (-90, 21), (-97, 16), (-105, 20), (-110, 23), (-117, 33), (-125, 40),
+     (-125, 49), (-135, 58), (-155, 58), (-165, 60)],
     # South America
-    [(-80, 9), (-62, 11), (-52, 5), (-35, -8), (-40, -22), (-48, -28),
-     (-58, -38), (-65, -52), (-70, -55), (-73, -37), (-70, -18),
-     (-80, -4), (-80, 9)],
+    [(-80, 10), (-75, 5), (-60, 0), (-50, -5), (-40, -10), (-35, -20),
+     (-40, -30), (-50, -35), (-60, -40), (-65, -50), (-70, -55),
+     (-73, -40), (-75, -20), (-80, -5), (-82, 5)],
     # Europe
-    [(-10, 36), (-9, 43), (-2, 48), (0, 51), (5, 58), (10, 59), (18, 56),
-     (21, 55), (28, 45), (23, 40), (19, 42), (12, 44), (8, 44), (3, 42),
-     (-2, 37), (-10, 36)],
+    [(-10, 36), (-5, 44), (0, 46), (5, 50), (8, 55), (10, 58), (18, 56),
+     (21, 55), (24, 60), (30, 62), (35, 66), (40, 68), (35, 60), (30, 55),
+     (25, 50), (20, 45), (15, 40), (10, 38), (5, 36), (0, 38), (-5, 36)],
     # Africa
-    [(-17, 15), (-16, 28), (-10, 31), (10, 37), (20, 32), (32, 31),
-     (35, 28), (43, 12), (51, 11), (48, -1), (40, -15), (35, -25),
-     (28, -33), (18, -34), (12, -18), (9, 4), (-8, 5), (-17, 15)],
+    [(-10, 35), (0, 36), (10, 37), (20, 32), (30, 31), (35, 28), (40, 15),
+     (48, 11), (51, 10), (45, 0), (40, -10), (35, -20), (30, -30),
+     (20, -35), (15, -30), (12, -18), (10, -5), (8, 5), (0, 5), (-8, 5),
+     (-15, 10), (-17, 15), (-15, 25), (-12, 30)],
     # Asia
-    [(30, 36), (36, 36), (44, 39), (48, 30), (57, 26), (61, 25),
-     (66, 25), (72, 20), (77, 8), (80, 13), (88, 22), (92, 16),
-     (98, 10), (104, 2), (108, 11), (114, 22), (121, 28), (127, 40),
-     (130, 42), (135, 44), (142, 50), (158, 52), (170, 60), (180, 66),
-     (180, 72), (160, 70), (140, 72), (110, 74), (80, 73), (60, 69),
-     (50, 69), (40, 68), (32, 70), (30, 62), (28, 55), (30, 45),
-     (28, 41), (30, 36)],
+    [(40, 68), (60, 70), (80, 73), (100, 77), (120, 73), (140, 72),
+     (160, 70), (170, 66), (162, 60), (158, 52), (150, 45), (142, 40),
+     (140, 35), (130, 33), (127, 35), (122, 30), (120, 25), (110, 20),
+     (105, 10), (100, 8), (95, 15), (90, 22), (85, 20), (80, 15),
+     (75, 10), (72, 20), (65, 25), (60, 25), (55, 28), (50, 30), (48, 30),
+     (45, 35), (42, 40), (40, 45), (38, 50), (40, 55), (40, 60)],
     # Australia
-    [(114, -22), (114, -35), (124, -33), (130, -32), (137, -35),
-     (140, -38), (150, -37), (153, -27), (146, -19), (142, -11),
-     (136, -12), (132, -11), (126, -14), (122, -17), (114, -22)],
+    [(113, -22), (114, -30), (115, -35), (120, -34), (125, -32), (130, -32),
+     (135, -35), (140, -38), (145, -38), (150, -37), (153, -27), (150, -22),
+     (146, -19), (142, -15), (142, -11), (137, -12), (135, -15), (132, -12),
+     (130, -13), (126, -14), (122, -17), (118, -20), (114, -22)],
+    # New Zealand
+    [(167, -45), (170, -42), (174, -41), (178, -38), (176, -35),
+     (174, -37), (170, -40), (167, -45)],
+    # Japan
+    [(130, 31), (133, 34), (137, 35), (140, 37), (141, 40), (143, 43),
+     (145, 44), (142, 42), (140, 38), (138, 35), (135, 33), (131, 32)],
 ]
 
 
-def project(lon, lat, x0, y0, w, h):
-    px = x0 + (lon + 180.0) / 360.0 * w
-    py = y0 + (80.0 - lat) / 135.0 * h
+def project(lon, lat, box):
+    """Equirectangular projection into the map box (x0, y0, x1, y1)."""
+    x0, y0, x1, y1 = box
+    px = x0 + (lon + 170.0) / 360.0 * (x1 - x0)
+    py = y0 + (70.0 - lat) / 125.0 * (y1 - y0)
     return px, py
 
 
-def draw_map(draw, x0, y0, w, h, pins):
-    draw.rectangle([x0, y0, x0 + w, y0 + h], fill=(214, 226, 232))
+def draw_map(draw, box, pins):
+    """Draw the stylised world map with numbered pins and tags."""
+    draw.rectangle(box, fill=OCEAN, outline=RULE, width=1)
     for poly in CONTINENTS:
-        pts = [project(lon, lat, x0, y0, w, h) for lon, lat in poly]
-        draw.polygon(pts, fill=(232, 226, 212), outline=(150, 146, 138))
+        pts = [project(lon, lat, box) for lon, lat in poly]
+        draw.polygon(pts, fill=LAND, outline=LAND_EDGE)
+    # Indonesia island dots (rough, as small ellipses)
+    for lon, lat in [(95, 2), (100, -1), (105, -4), (110, -7), (115, -8),
+                     (120, -9), (125, -5), (130, -3), (135, -4)]:
+        px, py = project(lon, lat, box)
+        draw.ellipse([px - 2, py - 1, px + 3, py + 2], fill=LAND,
+                     outline=LAND_EDGE)
+    fnt_num = sans_b(9)
+    fnt_tag = sans_b(9)
+    # label placement overrides for crowded pins (by story number):
+    # Antalya's tag goes above its pin so it cannot run into Bahrain's;
+    # Benghazi's tag goes left so it cannot run into Bahrain's;
+    # Wellington's tag goes up-left, Canberra's down-right.
+    LABEL_FIX = {1: (10, -20), 5: (-58, 2), 24: (-70, -22), 38: (6, 14)}
     for pin in pins:
-        px, py = project(pin["lon"], pin["lat"], x0, y0, w, h)
-        draw.ellipse([px - 7, py - 7, px + 7, py + 7], fill=RED)
-        draw.text((px - 3, py - 6), str(pin["n"]), font=F["pin"],
+        px, py = project(pin["lon"], pin["lat"], box)
+        draw.ellipse([px - 8, py - 8, px + 8, py + 8], fill=PIN,
+                     outline=(255, 255, 255), width=1)
+        num = str(pin["n"])
+        tw = draw.textlength(num, font=fnt_num)
+        draw.text((px - tw / 2, py - 5), num, font=fnt_num,
                   fill=(255, 255, 255))
-        ox, oy = pin.get("ox", 8), pin.get("oy", -14)
-        tw, _ = measure(draw, pin["tag"], F["pin"])
-        lx = min(max(px + ox, x0 + 2), x0 + w - tw - 2)
-        ly = min(max(py + oy, y0 + 2), y0 + h - 12)
-        draw.line([px, py, lx + tw / 2, ly + 4], fill=RED, width=1)
-        draw.text((lx, ly), pin["tag"], font=F["pin"], fill=INK)
+        tag = pin["tag"]
+        ox, oy = LABEL_FIX.get(pin["n"], (pin.get("ox", 8),
+                                          pin.get("oy", 8)))
+        tx = px + ox
+        ty = py + oy
+        draw.text((tx, ty), tag, font=fnt_tag, fill=INK)
 
 
-# ---- page -----------------------------------------------------------------
+# ---------------------------------------------------------------- page build
 
-def render():
+def build():
+    with open(DATA, encoding="utf-8") as fh:
+        d = json.load(fh)
+
     img = Image.new("RGB", (W, H), PAPER)
-    d = ImageDraw.Draw(img)
-    d.rectangle([4, 4, W - 5, H - 5], outline=INK, width=2)
-    d.rectangle([8, 8, W - 9, H - 9], outline=LINE, width=1)
+    draw = ImageDraw.Draw(img)
+    # outer frame
+    draw.rectangle([3, 3, W - 4, H - 4], outline=INK, width=5)
 
-    # masthead
-    d.text((M, 16), DATA["masthead"], font=F["brand"], fill=RED)
-    d.text((W - M - measure(d, "EST. 2025 · ONE PAGE, ONE DAY", F["brand"])[0],
-            16), "EST. 2025 · ONE PAGE, ONE DAY", font=F["brand"], fill=GREY)
-    d.line([M, 36, W - M, 36], fill=INK, width=2)
-    dw, _ = measure(d, DATA["date"], F["date"])
-    d.text(((W - dw) / 2, 40), DATA["date"], font=F["date"], fill=INK)
-    cw, _ = measure(d, DATA["counts"], F["counts"])
-    d.text(((W - cw) / 2, 92), DATA["counts"], font=F["counts"], fill=RED)
-    d.line([M, 112, W - M, 112], fill=INK, width=1)
+    L, R = 18, W - 18          # content left / right
+    CW = R - L                 # content width
 
-    # data strip
-    sy = 118
-    d.rectangle([M, sy, W - M, sy + 24], fill=INK)
-    strip = "   ◆   ".join(DATA["strip"])
-    sw, _ = measure(d, strip, F["strip"])
-    d.text(((W - sw) / 2, sy + 4), strip, font=F["strip"], fill=(250, 246, 236))
+    # ---- masthead
+    y = 16
+    draw.text((L, y), d["masthead"], font=serif_b(15), fill=RED)
+    right = "EST. 2025  ·  ONE PAGE, ONE DAY"
+    draw.text((R - text_w(draw, right, sans(10)), y + 3), right,
+              font=sans(10), fill=GRAY)
+    draw.line([L, 36, R, 36], fill=INK, width=2)
 
-    # three leads
-    ly, lh = 150, 200
-    col_w = (W - 2 * M - 2 * 14) // 3
-    for i, lead in enumerate(DATA["leads"]):
-        x = M + i * (col_w + 14)
-        d.text((x, ly), lead["kicker"], font=F["kick"], fill=RED)
-        ax, ay = x, ly + 16
-        ARTS[lead["art"]](d, ax, ay, col_w, 78)
-        hy = ay + 78 + 6
-        for ln in wrap(d, lead["headline"], F["head"], col_w):
-            d.text((x, hy), ln, font=F["head"], fill=INK)
-            hy += 20
-        for ln in wrap(d, lead["summary"], F["body"], col_w):
-            d.text((x, hy), ln, font=F["body"], fill=INK)
-            hy += 13
-        d.text((x, ly + lh - 30), lead["figures"], font=F["small"], fill=GREY)
-        tag_chip(d, x, ly + lh - 18, lead["label"])
-        sw2, _ = measure(d, lead["source"], F["tiny"])
-        d.text((x + col_w - sw2, ly + lh - 16), lead["source"],
-               font=F["tiny"], fill=GREY)
-        d.line([x, ly + lh - 4, x + col_w, ly + lh - 4], fill=LINE, width=1)
+    # ---- date hero
+    y = 42
+    hero = d["date"]
+    draw.text(((W - text_w(draw, hero, serif_b(50))) / 2, y), hero,
+              font=serif_b(50), fill=INK)
+    # ---- counts line
+    y = 96
+    counts = d["counts"]
+    draw.text(((W - text_w(draw, counts, sans_b(12))) / 2, y), counts,
+              font=sans_b(12), fill=RED)
+    draw.line([L, 114, R, 114], fill=INK, width=1)
 
-    # ten mid stories, two columns
-    my = ly + lh + 8
-    d.text((M, my), "THE DAY IN TEN", font=F["brand"], fill=RED)
-    d.line([M, my + 15, W - M, my + 15], fill=INK, width=1)
-    mid_y = my + 20
-    mid_col_w = (W - 2 * M - 20) // 2
-    row_h = 43
-    for i, st in enumerate(DATA["mid"]):
+    # ---- data strip
+    y = 118
+    draw.rectangle([L, y, R, y + 26], fill=INK)
+    strip = "  ◆  ".join(d["strip"])
+    draw.text(((W - text_w(draw, strip, sans_b(13))) / 2, y + 6), strip,
+              font=sans_b(13), fill=(255, 255, 255))
+
+    # ---- three leads
+    col_w = (CW - 24) // 3
+    top = 152
+    leads_end = top
+    for i, lead in enumerate(d["leads"]):
+        x = L + i * (col_w + 12)
+        yy = top
+        draw.text((x, yy), lead["kicker"], font=sans_b(11), fill=RED)
+        yy += 16
+        ART[lead["art"]](draw, x, yy, col_w, 116)
+        yy += 120
+        # headline: shrink until it fits in 2 lines, never 3
+        hfnt, hlines = fit_lines(draw, lead["headline"], [19, 18, 17],
+                                 col_w, 2)
+        lh = int(hfnt.size * 1.1)
+        for line in hlines:
+            draw.text((x, yy), line, font=hfnt, fill=INK)
+            yy += lh
+        yy += 2
+        # summary: at most 2 lines
+        slines = wrap(draw, lead["summary"], sans(11), col_w)[:2]
+        for line in slines:
+            draw.text((x, yy), line, font=sans(11), fill=INK)
+            yy += 13
+        yy += 2
+        draw.text((x, yy), lead["figures"], font=sans(10), fill=GRAY)
+        yy += 15
+        badge(draw, x, yy, lead["label"])
+        src = lead["source"]
+        draw.text((x + col_w - text_w(draw, src, sans(10)), yy + 1), src,
+                  font=sans(10), fill=GRAY)
+        leads_end = max(leads_end, yy + 14)
+
+    # ---- THE DAY IN TEN (items 4-13)
+    y = leads_end + 8
+    draw.text((L, y), "THE DAY IN TEN", font=sans_b(12), fill=RED)
+    draw.line([L, y + 16, R, y + 16], fill=INK, width=1)
+    y += 22
+    mid = d["mid"]
+    col_w2 = (CW - 24) // 2
+    row_h = 48
+    for i, item in enumerate(mid):
         col = i % 2
         row = i // 2
-        x = M + col * (mid_col_w + 20)
-        y = mid_y + row * row_h
-        d.text((x, y), f"{i + 4}.", font=F["num"], fill=RED)
-        tx = x + 26
-        for ln in wrap(d, st["h"], F["mid_head"], mid_col_w - 26):
-            d.text((tx, y), ln, font=F["mid_head"], fill=INK)
-            y += 16
-        for ln in wrap(d, st["s"], F["tiny"], mid_col_w - 26):
-            d.text((tx, y), ln, font=F["tiny"], fill=GREY)
-            y += 12
-        tag_chip(d, tx, mid_y + row * row_h + row_h - 16, st["label"])
-        sw3, _ = measure(d, st["src"], F["tiny"])
-        d.text((x + mid_col_w - sw3, mid_y + row * row_h + row_h - 14),
-               st["src"], font=F["tiny"], fill=GREY)
+        x = L + col * (col_w2 + 24)
+        yy = y + row * row_h
+        num = str(4 + i)
+        draw.text((x, yy), num, font=serif_b(15), fill=RED)
+        tx = x + 24
+        for line in wrap(draw, item["h"], sans_b(12), col_w2 - 24):
+            draw.text((tx, yy + 1), line, font=sans_b(12), fill=INK)
+            yy += 14
+        # summary sits under the headline block, aligned to text column
+        sy = y + row * row_h + 15
+        for line in wrap(draw, item["s"], sans(10), col_w2 - 24):
+            draw.text((tx, sy), line, font=sans(10), fill=GRAY)
+            sy += 12
+        by = y + row * row_h + 36
+        badge(draw, tx, by, item["label"])
+        src = item["src"]
+        draw.text((x + col_w2 - text_w(draw, src, sans(9)), by + 1), src,
+                  font=sans(9), fill=GRAY)
+    y += 5 * row_h + 6
 
-    # full numbered list
-    list_y = mid_y + 5 * row_h + 6
-    d.text((M, list_y), "THE FULL LIST — EVERY STORY, NUMBERED", font=F["brand"],
-           fill=RED)
-    d.line([M, list_y + 15, W - M, list_y + 15], fill=INK, width=1)
-    list_top = list_y + 20
-    list_col_w = (W - 2 * M - 20) // 2
-    list_row_h = 15
-    for i, st in enumerate(DATA["list"]):
-        n = i + 14
-        col = i % 2
-        row = i // 2
-        x = M + col * (list_col_w + 20)
-        y = list_top + row * list_row_h
-        d.text((x, y), f"{n}.", font=F["num"], fill=RED)
-        d.text((x + 26, y + 1), st["h"], font=F["list_head"], fill=INK)
-        hw, _ = measure(d, st["h"], F["list_head"])
-        sw4, _ = measure(d, st["src"], F["tiny"])
-        lx = x + 26 + hw + 8
-        # Only draw the badge when it fits clear of the source credit.
-        cw4, _ = measure(d, st["label"], F["chip"])
-        if lx + cw4 + 12 < x + list_col_w - sw4 - 6:
-            tag_chip(d, lx, y, st["label"])
-        d.text((x + list_col_w - sw4, y + 2), st["src"], font=F["tiny"],
-               fill=GREY)
+    # ---- THE FULL LIST (items 14-38)
+    draw.text((L, y), "THE FULL LIST  —  EVERY STORY, NUMBERED",
+              font=sans_b(12), fill=RED)
+    draw.line([L, y + 16, R, y + 16], fill=INK, width=1)
+    y += 22
+    items = d["list"]
+    rows = 13
+    row_h2 = 14
+    for i, item in enumerate(items):
+        col = i // rows
+        row = i % rows
+        x = L + col * (col_w2 + 24)
+        yy = y + row * row_h2
+        num = str(14 + i)
+        draw.text((x, yy), num, font=serif_b(11), fill=RED)
+        tx = x + 24
+        # headline, truncated to leave room for badge + source
+        src = item["src"]
+        src_w = text_w(draw, src, sans(9))
+        bw = 52
+        avail = col_w2 - 24 - bw - src_w - 16
+        hlines = wrap(draw, item["h"], sans(11), avail)
+        head = hlines[0]
+        draw.text((tx, yy), head, font=sans(11), fill=INK)
+        hw = text_w(draw, head, sans(11))
+        badge(draw, tx + hw + 6, yy, item["label"])
+        draw.text((x + col_w2 - src_w, yy + 1), src, font=sans(9),
+                  fill=GRAY)
+    y += rows * row_h2 + 8
 
-    # map + date check
-    bottom_y = list_top + 13 * list_row_h + 8
-    d.text((M, bottom_y), "WHERE IT HAPPENED", font=F["brand"], fill=RED)
-    d.text((W // 2 + 6, bottom_y), "DATE CHECK — WHAT WE LEFT OUT",
-           font=F["brand"], fill=RED)
-    d.line([M, bottom_y + 15, W - M, bottom_y + 15], fill=INK, width=1)
-    map_y = bottom_y + 20
-    map_h = H - 32 - map_y
-    map_w = W // 2 - M - 6
-    draw_map(d, M, map_y, map_w, map_h, DATA["pins"])
+    # ---- bottom: map + date check + timeline
+    draw.text((L, y), "WHERE IT HAPPENED", font=sans_b(12), fill=RED)
+    map_x0, map_y0 = L, y + 18
+    map_x1, map_y1 = L + 540, y + 128
+    draw_map(draw, (map_x0, map_y0, map_x1, map_y1), d["pins"])
 
-    dx = W // 2 + 6
-    dy = map_y
-    for item in DATA["datecheck"]:
-        d.text((dx + 8, dy), "✕", font=F["small"], fill=RED)
-        for ln in wrap(d, item, F["small"], W - M - dx - 20):
-            d.text((dx + 22, dy), ln, font=F["small"], fill=INK)
-            dy += 12
-        dy += 3
-    dy += 2
-    d.line([dx, dy, W - M, dy], fill=LINE, width=1)
-    dy += 6
-    d.text((dx, dy), "THE DAY, HOUR BY HOUR (UTC)", font=F["brand"], fill=RED)
-    dy += 15
-    for t, ev in DATA["timeline"]:
-        d.text((dx, dy), t, font=F["chip"], fill=RED)
-        d.text((dx + 96, dy), ev, font=F["small"], fill=INK)
-        dy += 11
+    rx = L + 552
+    rw = R - rx
+    ry = y
+    draw.text((rx, ry), "DATE CHECK  —  WHAT WE LEFT OUT",
+              font=sans_b(12), fill=RED)
+    ry += 20
+    for line in d["datecheck"]:
+        draw.text((rx, ry), "×", font=sans_b(11), fill=RED)
+        for ln in wrap(draw, line, sans(10), rw - 14):
+            draw.text((rx + 14, ry), ln, font=sans(10), fill=INK)
+            ry += 11
+        ry += 1
+    ry += 3
+    draw.text((rx, ry), "THE DAY, HOUR BY HOUR (UTC)",
+              font=sans_b(12), fill=RED)
+    ry += 17
+    for t, ev in d["timeline"]:
+        draw.text((rx, ry), t, font=sans_b(10), fill=RED)
+        tw = text_w(draw, t, sans_b(10))
+        draw.text((rx + tw + 8, ry), ev, font=sans(10), fill=INK)
+        ry += 11
 
-    # footer
-    fy = H - 24
-    d.line([M, fy - 6, W - M, fy - 6], fill=INK, width=1)
-    d.text((M, fy), "Sources: " + DATA["sources"], font=F["tiny"], fill=GREY)
-    tag = "MONDAY 23 NOVEMBER 2026"
-    tw5, _ = measure(d, tag, F["tiny"])
-    d.text((W - M - tw5, fy), tag, font=F["tiny"], fill=GREY)
+    # ---- footer
+    fy = H - 18
+    draw.text((L, fy), d["sources"], font=sans(8), fill=GRAY)
 
-    OUT.parent.mkdir(parents=True, exist_ok=True)
     img.save(OUT, format="PNG")
-    print(f"wrote {OUT} {img.size}")
+    return OUT
 
 
 if __name__ == "__main__":
-    render()
+    path = build()
+    print("wrote", path)

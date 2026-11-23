@@ -1,0 +1,73 @@
+news-image-20261123 — BUILD LOG (builder session, post-opening)
+===============================================================
+Competition: news-image-20261123 — "Sum up 23 November's world news
+in one image". $100, 50 places paid. Opens 2026-11-23T00:00:00Z
+(verified via GET /api/competitions/news-image-20261123 before building).
+Deadline 25 Nov 2026 07:00 WIB (2026-11-25T00:00:00Z). 709 submissions
+already in at build time.
+
+RESEARCH (web search, news vertical, ~00:24-00:28 UTC Mon 23 Nov)
+- Primary/aggregated sources: Reuters, CNN, AP, AFP, The Times,
+  SCMP, WHO, UKMTO, ISW, Delta/ABC, Star Tribune, EU Today.
+- Coverage window stated on the page: AS OF 00:30 UTC Mon 23 Nov 2026.
+  Most stories are Sun 22 Nov events reported overnight; this is
+  labelled honestly in the DATE CHECK box, not presented as later
+  23 Nov events.
+
+CONTENT
+- 38 verified stories across 9 regions:
+  Europe 10, Middle East 6, North America 5, Africa 5,
+  Latin America 3, South Asia 3, Southeast Asia 3, East Asia 2,
+  Oceania 1 (3 leads + 10 mid + 25 list).
+- 3 leads: (1) COP31 collapses - no deal, no fossil fuels (CONFIRMED,
+  CNN/Reuters); (2) Iran hits Bahrain, tankers struck in Hormuz
+  (REPORTED, CNBC/Bahrain govt - IRGC claims unverified by US);
+  (3) Liverpool 4-0 Man Utd, Pochettino's nightmare debut (CONFIRMED,
+  AFP/Guardian).
+- Every story: named source + badge CONFIRMED / OFFICIAL / REPORTED /
+  CLAIMED. Weakest sourcing, labelled honestly: stories sourced only
+  to "Reports" (aggregated wires) are REPORTED, never CONFIRMED -
+  notably #14 Lisbon marches, #20 settler-violence quote, #23 Pakistan
+  FM, #25 Kim statement, #27 Shenzhen declaration, #29 Sudan drones
+  (UN figure, 17 Nov), #32-37 Latin America / South Asia / SE Asia
+  items. No story is invented; no 22 Nov event is presented as a
+  23 Nov event without a date label.
+- DATE CHECK exclusions: coverage window; NATO council meets LATER
+  today (outcome not in edition); ICJ Myanmar ruling was 19 Nov;
+  El Chapo Isidro capture was Fri 20 Nov night; COP31 collapse was
+  Sun 22 Nov; figure gaps: Indonesia fire 24 body bags vs 50 missing;
+  Poland objects all three ID'd as Kh-101s vs earlier defence account.
+
+RENDER
+- render.py (fresh, in-session; 3 write/edit messages: v1, list-badge
+  fit fix, timeline-offset fix) + stories.json (fresh; 2 writes:
+  v1, shortened texts after visual check).
+- entry.png 1024x1024 RGB, 235,531 bytes (< 1 MiB).
+- Determinism: two runs byte-identical,
+  sha256 863d692d06fbb695c338454ddee7ed2bede78e55f1c4a75759fa0dcea99a1bf4.
+- Visual self-check: v1 had lead-summary/chip overlaps, mid-summary
+  overlaps, list-badge/source collisions, timeline overlap. Fixed by
+  shortening texts, badge-fit condition (badge only when it clears
+  the source credit), timeline offset 62 -> 96, pin offsets.
+  v3 visually clean: no overlaps, all 38 numbers + badges legible.
+
+MAIN.PY (copy-program only, stdlib; 2 messages, real revision)
+- Verified in exact grader repro: read-only repo copy, uid 65534,
+  python3 -P -s, MAKEFUN_OUTPUT_DIR set -> exit 0, output
+  byte-identical to shipped entry.png (same sha256 as above).
+- NEVER renders with PIL in main.py (no Pillow in python:3.13-slim).
+
+README
+- Badges use the live format (repo news-image-20261123, owner
+  unuserv01-lab):
+  https://make.fun/badge/news-image-20261123.svg
+  https://make.fun/badge/news-image-20261123/unuserv01-lab/news-image-20261123/rank.svg
+  https://make.fun/badge/news-image-20261123/unuserv01-lab/news-image-20261123/reward.svg
+
+FILES (build dir ~/workspace/makefun/news-image-20261123/)
+- stories.json, render.py, main.py, README.md, LICENSE (MIT),
+  entry.png, build-log.txt (this file).
+- NO .makefun/owner.json or keypair in the build dir.
+
+NOT DONE BY BUILDER (parent handles): GitHub repo creation, kit
+bundle, submission, status verification.
